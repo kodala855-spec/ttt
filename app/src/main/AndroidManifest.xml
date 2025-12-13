@@ -5,6 +5,9 @@
     <!-- Strictly required permissions only -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.MANAGE_ACTIVITY_TASKS" />
+    <uses-permission android:name="android.permission.DISABLE_KEYGUARD" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:allowBackup="false"
@@ -13,13 +16,15 @@
         android:theme="@style/Theme.MinimalKioskApp.EdgeToEdge"
         tools:targetApi="34">
 
-        <!-- Launcher activity placeholder -->
+        <!-- Launcher activity with kiosk mode (LockTask) -->
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:lockTaskMode="always">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.HOME" />
             </intent-filter>
         </activity>
 
