@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material Design 3 colors -->
+    <color name="primary">#6750A4</color>
+    <color name="primaryVariant">#4F2B7A</color>
+    <color name="secondary">#625B71</color>
+    <color name="surface">#FEF7FF</color>
+    <color name="background">#FFFBFE</color>
+    <color name="error">#BA1A1A</color>
+    
+    <!-- Text colors -->
+    <color name="text_primary">#1C1B1F</color>
+    <color name="text_secondary">#49454F</color>
+    <color name="text_on_primary">#FFFFFF</color>
+    <color name="text_on_surface">#1C1B1F</color>
+    
+    <!-- Transparent colors for edge-to-edge -->
+    <color name="transparent">#00000000</color>
+</resources>
