@@ -1,0 +1,59 @@
+{
+  // Main kiosk configuration - URL to load in the WebView
+  "url": "https://www.napolyane.com/menu-restaurant",
+  
+  // Idle timeout in milliseconds (300000 = 5 minutes)
+  // After this duration of inactivity, the kiosk will restart
+  "idle_timeout_ms": 300000,
+  
+  // Enable/disable immersive fullscreen mode
+  "immersive_mode": true,
+  
+  // Enable/disable haptic feedback for long-press
+  "haptic_feedback": false,
+  
+  // Enable/disable JavaScript in WebView
+  "javascript_enabled": true,
+  
+  // WebView cache mode: "no_cache", "default", "cache_else_network", "cache_first"
+  "cache_mode": "no_cache",
+  
+  // Enable/disable zoom controls
+  "zoom_enabled": false,
+  
+  // Enable/disable DOM storage
+  "dom_storage_enabled": true,
+  
+  // Kiosk mode settings
+  "kiosk_mode": {
+    // Prevent back button from exiting app
+    "disable_back_button": true,
+    
+    // Prevent home button access
+    "disable_home_button": true,
+    
+    // Prevent app switcher access
+    "disable_app_switch": true,
+    
+    // Keep screen always on
+    "keep_screen_on": true
+  },
+  
+  // URL filtering and security
+  "security": {
+    // Whitelist of allowed hostnames (empty array = allow all)
+    "allowed_hosts": [],
+    
+    // Block external links from opening in external browsers
+    "block_external_links": true
+  },
+  
+  // Future extension placeholder
+  // Add new configuration options here as the kiosk evolves
+  "future_extensions": {
+    "night_mode": false,
+    "orientation_lock": "portrait",
+    "volume_locked": false,
+    "status_bar_hidden": true
+  }
+}
