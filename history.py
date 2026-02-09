@@ -1,205 +1,145 @@
-import aiosqlite
+import sqlite3
+import json
 import logging
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-from config import Config
+from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 
 class HistoryManager:
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: str, max_workers: int = 5):
         self.db_path = db_path
-        self.executor = ThreadPoolExecutor(max_workers=2)
-        self._initialized = False
-
-    async def initialize(self) -> None:
-        if self._initialized:
-            return
-
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._init_db()
+    
+    def _init_db(self):
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute("""
-                    CREATE TABLE IF NOT EXISTS messages (
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS chat_history (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         chat_id INTEGER NOT NULL,
                         message_id INTEGER NOT NULL,
-                        user_id INTEGER,
-                        username TEXT,
-                        text TEXT,
-                        timestamp DATETIME NOT NULL,
-                        is_outgoing BOOLEAN NOT NULL DEFAULT 0,
-                        UNIQUE(chat_id, message_id)
+                        role TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        timestamp REAL NOT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
-
-                await db.execute("""
+                cursor.execute("""
                     CREATE INDEX IF NOT EXISTS idx_chat_timestamp 
-                    ON messages(chat_id, timestamp DESC)
+                    ON chat_history(chat_id, timestamp DESC)
                 """)
-
-                await db.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_chat_outgoing 
-                    ON messages(chat_id, is_outgoing, timestamp DESC)
-                """)
-
-                await db.execute("""
-                    CREATE TABLE IF NOT EXISTS response_log (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        chat_id INTEGER NOT NULL,
-                        response_timestamp DATETIME NOT NULL
-                    )
-                """)
-
-                await db.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_response_chat_time 
-                    ON response_log(chat_id, response_timestamp DESC)
-                """)
-
-                await db.commit()
-                self._initialized = True
-                logger.info(f"Database initialized at {self.db_path}")
-        except Exception as e:
-            logger.error(f"Failed to initialize database: {e}")
+                conn.commit()
+                logger.info(f"Database initialized: {self.db_path}")
+        except sqlite3.Error as e:
+            logger.error(f"Database initialization error: {e}")
             raise
-
-    async def store_message(
-        self,
-        chat_id: int,
-        message_id: int,
-        user_id: Optional[int],
-        username: Optional[str],
-        text: Optional[str],
-        timestamp: datetime,
-        is_outgoing: bool = False
-    ) -> None:
+    
+    def _add_message_sync(self, chat_id: int, message_id: int, role: str, content: str, timestamp: float):
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute("""
-                    INSERT OR REPLACE INTO messages 
-                    (chat_id, message_id, user_id, username, text, timestamp, is_outgoing)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (chat_id, message_id, user_id, username, text, timestamp, is_outgoing))
-                await db.commit()
-        except Exception as e:
-            logger.error(f"Failed to store message: {e}")
-
-    async def get_recent_messages(
-        self,
-        chat_id: int,
-        limit: int = 20,
-        include_outgoing: bool = True
-    ) -> List[Dict]:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO chat_history (chat_id, message_id, role, content, timestamp)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (chat_id, message_id, role, content, timestamp))
+                conn.commit()
+                logger.debug(f"Added message to history: chat_id={chat_id}, role={role}")
+        except sqlite3.Error as e:
+            logger.error(f"Error adding message to history: {e}")
+    
+    async def add_message(self, chat_id: int, message_id: int, role: str, content: str, timestamp: float):
+        import asyncio
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            self.executor,
+            self._add_message_sync,
+            chat_id, message_id, role, content, timestamp
+        )
+    
+    def _get_recent_history_sync(self, chat_id: int, limit: int) -> List[Dict]:
         try:
-            async with aiosqlite.connect(self.db_path) as db:
-                db.row_factory = aiosqlite.Row
-                if include_outgoing:
-                    cursor = await db.execute("""
-                        SELECT * FROM messages 
-                        WHERE chat_id = ? 
-                        ORDER BY timestamp DESC 
-                        LIMIT ?
-                    """, (chat_id, limit))
-                else:
-                    cursor = await db.execute("""
-                        SELECT * FROM messages 
-                        WHERE chat_id = ? AND is_outgoing = 0 
-                        ORDER BY timestamp DESC 
-                        LIMIT ?
-                    """, (chat_id, limit))
-
-                rows = await cursor.fetchall()
-                return [dict(row) for row in reversed(rows)]
-        except Exception as e:
-            logger.error(f"Failed to get recent messages: {e}")
-            return []
-
-    async def get_context_for_ai(self, chat_id: int, max_messages: int = 10) -> str:
-        messages = await self.get_recent_messages(chat_id, limit=max_messages)
-
-        if not messages:
-            return ""
-
-        context_lines = []
-        for msg in messages:
-            sender = "You" if msg["is_outgoing"] else (msg["username"] or f"User{msg['user_id']}")
-            text = msg["text"] or "[media]"
-            context_lines.append(f"{sender}: {text}")
-
-        return "\n".join(context_lines)
-
-    async def log_response(self, chat_id: int) -> None:
-        try:
-            async with aiosqlite.connect(self.db_path) as db:
-                await db.execute("""
-                    INSERT INTO response_log (chat_id, response_timestamp)
-                    VALUES (?, ?)
-                """, (chat_id, datetime.now()))
-                await db.commit()
-        except Exception as e:
-            logger.error(f"Failed to log response: {e}")
-
-    async def can_respond(self, chat_id: int) -> bool:
-        try:
-            async with aiosqlite.connect(self.db_path) as db:
-                cursor = await db.execute("""
-                    SELECT response_timestamp FROM response_log
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT role, content, timestamp
+                    FROM chat_history
                     WHERE chat_id = ?
-                    ORDER BY response_timestamp DESC
-                    LIMIT 1
-                """, (chat_id,))
-
-                row = await cursor.fetchone()
-                if not row:
-                    return True
-
-                last_response = datetime.fromisoformat(row[0])
-                time_since = (datetime.now() - last_response).total_seconds()
-                return time_since >= Config.MIN_RESPONSE_INTERVAL
-        except Exception as e:
-            logger.error(f"Failed to check response eligibility: {e}")
-            return True
-
-    async def get_message_stats(self, chat_id: int, days: int = 7) -> Dict:
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                """, (chat_id, limit))
+                
+                rows = cursor.fetchall()
+                history = [
+                    {
+                        'role': row[0],
+                        'content': row[1],
+                        'timestamp': row[2]
+                    }
+                    for row in reversed(rows)
+                ]
+                logger.debug(f"Retrieved {len(history)} messages for chat_id={chat_id}")
+                return history
+        except sqlite3.Error as e:
+            logger.error(f"Error retrieving history: {e}")
+            return []
+    
+    async def get_recent_history(self, chat_id: int, limit: int) -> List[Dict]:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            self.executor,
+            self._get_recent_history_sync,
+            chat_id, limit
+        )
+    
+    def _clear_chat_history_sync(self, chat_id: int):
         try:
-            since = datetime.now() - timedelta(days=days)
-            async with aiosqlite.connect(self.db_path) as db:
-                cursor = await db.execute("""
-                    SELECT 
-                        COUNT(*) as total,
-                        SUM(CASE WHEN is_outgoing = 1 THEN 1 ELSE 0 END) as outgoing,
-                        SUM(CASE WHEN is_outgoing = 0 THEN 1 ELSE 0 END) as incoming
-                    FROM messages
-                    WHERE chat_id = ? AND timestamp > ?
-                """, (chat_id, since))
-
-                row = await cursor.fetchone()
-                return {
-                    "total": row[0] or 0,
-                    "outgoing": row[1] or 0,
-                    "incoming": row[2] or 0
-                }
-        except Exception as e:
-            logger.error(f"Failed to get message stats: {e}")
-            return {"total": 0, "outgoing": 0, "incoming": 0}
-
-    async def cleanup_old_messages(self, days: int = 30) -> int:
-        try:
-            cutoff = datetime.now() - timedelta(days=days)
-            async with aiosqlite.connect(self.db_path) as db:
-                cursor = await db.execute("""
-                    DELETE FROM messages WHERE timestamp < ?
-                """, (cutoff,))
-                await db.commit()
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM chat_history WHERE chat_id = ?", (chat_id,))
                 deleted = cursor.rowcount
-                logger.info(f"Cleaned up {deleted} old messages")
-                return deleted
-        except Exception as e:
-            logger.error(f"Failed to cleanup old messages: {e}")
-            return 0
-
-    async def close(self) -> None:
+                conn.commit()
+                logger.info(f"Cleared {deleted} messages from chat_id={chat_id}")
+        except sqlite3.Error as e:
+            logger.error(f"Error clearing chat history: {e}")
+    
+    async def clear_chat_history(self, chat_id: int):
+        import asyncio
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            self.executor,
+            self._clear_chat_history_sync,
+            chat_id
+        )
+    
+    def _get_stats_sync(self) -> Dict:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM chat_history")
+                total_messages = cursor.fetchone()[0]
+                
+                cursor.execute("SELECT COUNT(DISTINCT chat_id) FROM chat_history")
+                total_chats = cursor.fetchone()[0]
+                
+                return {
+                    'total_messages': total_messages,
+                    'total_chats': total_chats
+                }
+        except sqlite3.Error as e:
+            logger.error(f"Error getting stats: {e}")
+            return {'total_messages': 0, 'total_chats': 0}
+    
+    async def get_stats(self) -> Dict:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self.executor, self._get_stats_sync)
+    
+    def close(self):
         self.executor.shutdown(wait=True)
-        logger.info("HistoryManager closed")
+        logger.info("HistoryManager executor shutdown")

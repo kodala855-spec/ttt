@@ -1,397 +1,255 @@
 import asyncio
 import logging
-import json
-import random
-import signal
-from datetime import datetime
-from typing import Optional, Dict
-from collections import deque
+import time
+from pathlib import Path
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from pyrogram.errors import FloodWait, RPCError
+from pyrogram.errors import FloodWait, BadRequest
 
-from config import Config, ConfigurationError
-from behavior import (
-    should_respond,
-    is_dnd_active,
-    simulate_typing_delay,
-    add_typo,
-    add_casual_suffix,
-    truncate_message,
-    select_random_photo,
-    select_random_video_note,
-    select_random_sticker,
-    calculate_response_delay,
-    should_send_media
-)
+from config import Config
 from history import HistoryManager
 from ai_handler import AIHandler
+from behavior import (
+    add_typos,
+    add_delays,
+    casualize_text,
+    should_reply,
+    parse_tags,
+    select_random_file,
+    get_sticker_id,
+    format_history_for_ai,
+    is_dnd_active,
+    sanitize_filename,
+    validate_reaction_emoji
+)
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("userbot.log"),
+        logging.FileHandler('userbot.log'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
 
 
-class RateLimiter:
-    def __init__(self, max_messages: int, window: int):
-        self.max_messages = max_messages
-        self.window = window
-        self.messages: Dict[int, deque] = {}
-
-    def can_send(self, chat_id: int) -> bool:
-        now = datetime.now().timestamp()
-        if chat_id not in self.messages:
-            self.messages[chat_id] = deque()
-
-        queue = self.messages[chat_id]
-
-        while queue and queue[0] < now - self.window:
-            queue.popleft()
-
-        return len(queue) < self.max_messages
-
-    def record_message(self, chat_id: int) -> None:
-        now = datetime.now().timestamp()
-        if chat_id not in self.messages:
-            self.messages[chat_id] = deque()
-        self.messages[chat_id].append(now)
-
-
 class HumanUserBot:
     def __init__(self):
-        self.app: Optional[Client] = None
-        self.history: Optional[HistoryManager] = None
-        self.ai: Optional[AIHandler] = None
-        self.rate_limiter: Optional[RateLimiter] = None
-        self.stickers: list = []
-        self.running = False
-
-    async def initialize(self) -> None:
-        try:
-            Config.validate()
-        except ConfigurationError as e:
-            logger.error(f"Configuration error:\n{e}")
-            raise
-
-        log_level = getattr(logging, Config.LOG_LEVEL)
-        logging.getLogger().setLevel(log_level)
-
+        Config.validate()
+        
         self.app = Client(
-            name="human_userbot",
-            api_id=Config.API_ID,
+            "human_userbot",
+            api_id=int(Config.API_ID),
             api_hash=Config.API_HASH,
             phone_number=Config.PHONE_NUMBER
         )
-
-        self.history = HistoryManager(Config.DB_FILE)
-        await self.history.initialize()
-
-        self.ai = AIHandler()
-
-        self.rate_limiter = RateLimiter(
-            Config.RATE_LIMIT_MESSAGES,
-            Config.RATE_LIMIT_WINDOW
+        
+        self.history = HistoryManager(Config.DB_PATH)
+        self.ai = AIHandler(
+            api_key=Config.OPENAI_API_KEY,
+            system_prompt=Config.SYSTEM_PROMPT,
+            timeout=Config.AI_TIMEOUT
         )
-
-        try:
-            with open(Config.STICKERS_FILE, 'r') as f:
-                self.stickers = json.load(f)
-        except Exception as e:
-            logger.warning(f"Failed to load stickers: {e}")
-            self.stickers = ["👍", "❤️", "😂"]
-
-        self._setup_handlers()
-        logger.info("HumanUserBot initialized successfully")
-
-    def _setup_handlers(self) -> None:
-        @self.app.on_message(filters.private | filters.group)
-        async def handle_message(client: Client, message: Message):
-            await self._process_message(message)
-
-    async def _process_message(self, message: Message) -> None:
-        try:
-            if message.outgoing:
-                await self._store_outgoing_message(message)
+        
+        self.stickers = Config.load_stickers()
+        self.owner_id = int(Config.OWNER_ID)
+        self.paused = False
+        
+        self.register_handlers()
+        logger.info("HumanUserBot initialized")
+    
+    def register_handlers(self):
+        @self.app.on_message(filters.command("pause", prefixes=".") & filters.me)
+        async def pause_handler(client: Client, message: Message):
+            self.paused = True
+            await message.edit("🔇 Bot paused")
+            logger.info("Bot paused by owner")
+        
+        @self.app.on_message(filters.command("resume", prefixes=".") & filters.me)
+        async def resume_handler(client: Client, message: Message):
+            self.paused = False
+            await message.edit("🔊 Bot resumed")
+            logger.info("Bot resumed by owner")
+        
+        @self.app.on_message(filters.command("status", prefixes=".") & filters.me)
+        async def status_handler(client: Client, message: Message):
+            stats = await self.history.get_stats()
+            status_text = f"""
+📊 Bot Status
+State: {'Paused' if self.paused else 'Active'}
+DND: {Config.DND_START} - {Config.DND_END}
+Messages: {stats['total_messages']}
+Chats: {stats['total_chats']}
+            """.strip()
+            await message.edit(status_text)
+        
+        @self.app.on_message(filters.command("clear", prefixes=".") & filters.me)
+        async def clear_handler(client: Client, message: Message):
+            chat_id = message.chat.id
+            await self.history.clear_chat_history(chat_id)
+            await message.edit("🗑️ Chat history cleared")
+            logger.info(f"Cleared history for chat {chat_id}")
+        
+        @self.app.on_message(filters.incoming & ~filters.me & ~filters.bot)
+        async def message_handler(client: Client, message: Message):
+            if self.paused:
+                logger.debug("Bot is paused, ignoring message")
                 return
-
-            await self._store_incoming_message(message)
-
-            if not self._should_process_message(message):
+            
+            if is_dnd_active(Config.DND_START, Config.DND_END):
+                logger.debug("DND active, ignoring message")
                 return
-
-            if is_dnd_active():
-                logger.info("DND active, skipping response")
-                return
-
-            if not await self.history.can_respond(message.chat.id):
-                logger.info("Response interval not met, skipping")
-                return
-
-            if not self.rate_limiter.can_send(message.chat.id):
-                logger.warning(f"Rate limit reached for chat {message.chat.id}")
-                return
-
-            if not should_respond():
-                logger.info("Random chance: not responding")
-                return
-
-            await self._handle_response(message)
-
-        except Exception as e:
-            logger.error(f"Error processing message: {e}", exc_info=True)
-
-    def _should_process_message(self, message: Message) -> bool:
-        if message.empty:
-            return False
-
-        if message.service:
-            return False
-
-        if message.via_bot:
-            return False
-
-        return True
-
-    async def _store_incoming_message(self, message: Message) -> None:
-        try:
-            text = message.text or message.caption or ""
-            await self.history.store_message(
-                chat_id=message.chat.id,
-                message_id=message.id,
-                user_id=message.from_user.id if message.from_user else None,
-                username=message.from_user.first_name if message.from_user else None,
-                text=text,
-                timestamp=message.date,
-                is_outgoing=False
-            )
-        except Exception as e:
-            logger.error(f"Failed to store incoming message: {e}")
-
-    async def _store_outgoing_message(self, message: Message) -> None:
-        try:
-            text = message.text or message.caption or ""
-            await self.history.store_message(
-                chat_id=message.chat.id,
-                message_id=message.id,
-                user_id=None,
-                username="You",
-                text=text,
-                timestamp=message.date,
-                is_outgoing=True
-            )
-        except Exception as e:
-            logger.error(f"Failed to store outgoing message: {e}")
-
-    async def _handle_response(self, message: Message) -> None:
-        try:
-            chat_title = None
-            if message.chat:
-                chat_title = message.chat.title or message.chat.first_name
-
-            context = await self.history.get_context_for_ai(message.chat.id, max_messages=10)
-
+            
+            chat_id = message.chat.id
             message_text = message.text or message.caption or ""
-            response_delay = calculate_response_delay(len(message_text))
-            await asyncio.sleep(response_delay)
-
-            media_type = should_send_media()
-
-            if media_type == "reaction":
-                await self._send_reaction(message)
-            elif media_type == "photo":
-                await self._send_photo_response(message, context, chat_title)
-            elif media_type == "video_note":
-                await self._send_video_note_response(message)
-            elif media_type == "sticker":
-                await self._send_sticker_response(message)
+            
+            if not message_text:
+                logger.debug("No text content, skipping")
+                return
+            
+            await self.history.add_message(
+                chat_id=chat_id,
+                message_id=message.id,
+                role="user",
+                content=message_text,
+                timestamp=time.time()
+            )
+            
+            me = await client.get_me()
+            username = me.username if me else None
+            
+            if not should_reply(message_text, username):
+                logger.debug("Decided not to reply")
+                return
+            
+            try:
+                await self.process_and_respond(client, message, chat_id)
+            except Exception as e:
+                logger.error(f"Error processing message: {e}")
+    
+    async def process_and_respond(self, client: Client, message: Message, chat_id: int):
+        history_entries = await self.history.get_recent_history(chat_id, Config.HISTORY_LIMIT)
+        formatted_history = format_history_for_ai(history_entries)
+        
+        ai_response = await self.ai.get_response_with_retry(formatted_history)
+        
+        if not ai_response:
+            logger.warning("No AI response received")
+            return
+        
+        clean_text, tags = parse_tags(ai_response)
+        
+        await asyncio.sleep(add_delays())
+        
+        if tags['reaction']:
+            await self.send_reaction(message, tags['reaction'])
+        
+        if clean_text:
+            clean_text = casualize_text(clean_text)
+            clean_text = add_typos(clean_text, probability=0.05)
+            
+            await client.send_chat_action(chat_id, "typing")
+            await asyncio.sleep(min(len(clean_text) / 20, 5))
+            
+            try:
+                sent_message = await message.reply_text(clean_text)
+                
+                await self.history.add_message(
+                    chat_id=chat_id,
+                    message_id=sent_message.id,
+                    role="assistant",
+                    content=clean_text,
+                    timestamp=time.time()
+                )
+                
+                logger.info(f"Sent reply to chat {chat_id}")
+            except FloodWait as e:
+                logger.warning(f"FloodWait: sleeping for {e.value}s")
+                await asyncio.sleep(e.value)
+            except BadRequest as e:
+                logger.error(f"BadRequest: {e}")
+        
+        if tags['photo']:
+            await self.send_photo(client, message, tags['photo'])
+        
+        if tags['video_note']:
+            await self.send_video_note(client, message, tags['video_note'])
+        
+        if tags['sticker']:
+            await self.send_sticker(client, message, tags['sticker'])
+    
+    async def send_reaction(self, message: Message, emoji: str):
+        try:
+            if validate_reaction_emoji(emoji):
+                await message.react(emoji)
+                logger.info(f"Sent reaction: {emoji}")
             else:
-                await self._send_text_response(message, context, chat_title)
-
-            await self.history.log_response(message.chat.id)
-            self.rate_limiter.record_message(message.chat.id)
-
-        except FloodWait as e:
-            logger.warning(f"FloodWait: sleeping for {e.value} seconds")
-            await asyncio.sleep(e.value)
-        except RPCError as e:
-            logger.error(f"RPC Error: {e}")
-        except Exception as e:
-            logger.error(f"Error handling response: {e}", exc_info=True)
-
-    async def _send_text_response(
-        self,
-        message: Message,
-        context: str,
-        chat_title: Optional[str]
-    ) -> None:
-        try:
-            message_text = message.text or message.caption or ""
-            response = await self.ai.generate_response(message_text, context, chat_title)
-
-            if not response:
-                logger.warning("No response generated by AI")
-                return
-
-            response = truncate_message(response)
-            response = add_typo(response)
-            response = add_casual_suffix(response)
-
-            await simulate_typing_delay()
-            await self.app.send_chat_action(message.chat.id, "typing")
-            await asyncio.sleep(1)
-
-            await message.reply(response)
-            logger.info(f"Sent text response to chat {message.chat.id}")
-
-        except Exception as e:
-            logger.error(f"Error sending text response: {e}")
-
-    async def _send_reaction(self, message: Message) -> None:
-        try:
-            reactions = ["👍", "❤️", "🔥", "😂", "😮", "🤔", "👌"]
-            reaction = random.choice(reactions)
-
-            await asyncio.sleep(random.uniform(0.5, 2.0))
-            await message.react(reaction)
-            logger.info(f"Sent reaction {reaction} to chat {message.chat.id}")
-
+                logger.warning(f"Invalid reaction emoji: {emoji}")
         except Exception as e:
             logger.error(f"Error sending reaction: {e}")
-
-    async def _send_photo_response(
-        self,
-        message: Message,
-        context: str,
-        chat_title: Optional[str]
-    ) -> None:
+    
+    async def send_photo(self, client: Client, message: Message, photo_identifier: str):
         try:
-            photo_path = select_random_photo(Config.PHOTOS_DIR)
-            if not photo_path:
-                logger.warning("No photos available, falling back to text")
-                await self._send_text_response(message, context, chat_title)
-                return
-
-            message_text = message.text or message.caption or ""
-            caption = await self.ai.generate_response(message_text, context, chat_title)
-
-            if caption:
-                caption = truncate_message(caption, 1024)
-                caption = add_typo(caption)
-                caption = add_casual_suffix(caption)
-
-            await simulate_typing_delay()
-            await self.app.send_chat_action(message.chat.id, "upload_photo")
-            await asyncio.sleep(1)
-
-            await message.reply_photo(photo_path, caption=caption or "")
-            logger.info(f"Sent photo response to chat {message.chat.id}")
-
+            if photo_identifier == "random":
+                photo_path = select_random_file(Config.PHOTOS_DIR)
+            else:
+                photo_path = Config.PHOTOS_DIR / sanitize_filename(photo_identifier)
+                if not photo_path.exists():
+                    logger.warning(f"Photo not found: {photo_path}")
+                    return
+                photo_path = str(photo_path)
+            
+            if photo_path:
+                await message.reply_photo(photo_path)
+                logger.info(f"Sent photo: {photo_path}")
         except Exception as e:
             logger.error(f"Error sending photo: {e}")
-
-    async def _send_video_note_response(self, message: Message) -> None:
+    
+    async def send_video_note(self, client: Client, message: Message, video_identifier: str):
         try:
-            video_path = select_random_video_note(Config.VIDEO_NOTES_DIR)
-            if not video_path:
-                logger.warning("No video notes available, falling back to reaction")
-                await self._send_reaction(message)
-                return
-
-            await simulate_typing_delay()
-            await self.app.send_chat_action(message.chat.id, "upload_video")
-            await asyncio.sleep(1)
-
-            await message.reply_video_note(video_path)
-            logger.info(f"Sent video note to chat {message.chat.id}")
-
+            if video_identifier == "random":
+                video_path = select_random_file(Config.VIDEO_NOTES_DIR)
+            else:
+                video_path = Config.VIDEO_NOTES_DIR / sanitize_filename(video_identifier)
+                if not video_path.exists():
+                    logger.warning(f"Video note not found: {video_path}")
+                    return
+                video_path = str(video_path)
+            
+            if video_path:
+                await message.reply_video_note(video_path)
+                logger.info(f"Sent video note: {video_path}")
         except Exception as e:
             logger.error(f"Error sending video note: {e}")
-
-    async def _send_sticker_response(self, message: Message) -> None:
+    
+    async def send_sticker(self, client: Client, message: Message, sticker_key: str):
         try:
-            sticker = select_random_sticker(self.stickers)
-            if not sticker:
-                logger.warning("No stickers available, falling back to reaction")
-                await self._send_reaction(message)
-                return
-
-            await asyncio.sleep(random.uniform(0.5, 2.0))
-
-            if sticker.startswith("👍") or sticker.startswith("❤") or len(sticker) <= 2:
-                await message.react(sticker)
-                logger.info(f"Sent sticker/emoji {sticker} as reaction")
-            else:
-                await message.reply(sticker)
-                logger.info(f"Sent sticker {sticker}")
-
+            sticker_id = get_sticker_id(self.stickers, sticker_key)
+            if sticker_id:
+                await message.reply_sticker(sticker_id)
+                logger.info(f"Sent sticker: {sticker_key}")
         except Exception as e:
             logger.error(f"Error sending sticker: {e}")
-
-    async def start(self) -> None:
-        self.running = True
+    
+    def run(self):
         logger.info("Starting HumanUserBot...")
-
-        try:
-            await self.app.start()
-            logger.info("HumanUserBot started successfully")
-            logger.info(f"Logged in as: {self.app.me.first_name} (@{self.app.me.username})")
-
-            await asyncio.Event().wait()
-
-        except KeyboardInterrupt:
-            logger.info("Received interrupt signal")
-        except Exception as e:
-            logger.error(f"Error in main loop: {e}", exc_info=True)
-        finally:
-            await self.stop()
-
-    async def stop(self) -> None:
-        if not self.running:
-            return
-
-        logger.info("Stopping HumanUserBot...")
-        self.running = False
-
-        try:
-            if self.app and self.app.is_connected:
-                await self.app.stop()
-
-            if self.ai:
-                await self.ai.close()
-
-            if self.history:
-                await self.history.close()
-
-            logger.info("HumanUserBot stopped successfully")
-        except Exception as e:
-            logger.error(f"Error during shutdown: {e}")
+        self.app.run()
+    
+    def __del__(self):
+        if hasattr(self, 'history'):
+            self.history.close()
 
 
-async def main():
-    bot = HumanUserBot()
-
-    loop = asyncio.get_event_loop()
-
-    def signal_handler(sig, frame):
-        logger.info(f"Received signal {sig}")
-        loop.create_task(bot.stop())
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
+def main():
     try:
-        await bot.initialize()
-        await bot.start()
+        bot = HumanUserBot()
+        bot.run()
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Fatal error: {e}", exc_info=True)
-        await bot.stop()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
