@@ -9,14 +9,14 @@ A sophisticated Telegram userbot powered by Pyrogram and OpenAI that mimics huma
 - **Conversation History**: SQLite database with async operations
 - **Human-like Behavior**: Realistic typing delays, typos, casual language
 - **Smart Reply Logic**: Contextual decision-making for when to respond
-- **Do Not Disturb**: Configurable quiet hours
+- **Do Not Disturb**: Configurable quiet hours with sleepy responses
 
 ### Advanced Features
-- **Owner Commands**: Pause/resume, status check, history clearing
+- **Owner Commands**: Pause/resume, status check, history view, blacklist/whitelist
 - **Media Support**: Send photos, video notes, and stickers
 - **Reaction Support**: React to messages with emojis
-- **Tag Parsing**: Extract media/reaction commands from AI responses
-- **Safety Pause**: Manual control to prevent unwanted responses
+- **Tag Parsing**: Extract media/reaction/learning commands from AI responses
+- **Safety Auto-Pause**: Automatically pauses on owner message
 - **Async Architecture**: Non-blocking operations with ThreadPoolExecutor
 
 ## Installation
@@ -85,12 +85,14 @@ On first run, you'll be prompted to enter the verification code sent to your Tel
 
 ### Owner Commands
 
-All owner commands start with a dot (`.`) and only work for messages sent by you:
+All owner commands start with a forward slash (`/`) and only work for messages sent by the owner:
 
-- `.pause` - Pause bot responses
-- `.resume` - Resume bot responses
-- `.status` - Show bot status and statistics
-- `.clear` - Clear conversation history for current chat
+- `/pause` - Pause bot responses
+- `/resume` - Resume bot responses
+- `/status` - Show bot status and statistics
+- `/history` - Show recent chat history
+- `/blacklist` - Reply to a user to blacklist them
+- `/whitelist` - Reply to a user to whitelist them
 
 ### Configuration
 
@@ -107,6 +109,9 @@ AI_TIMEOUT=30
 # Number of messages to include in context
 HISTORY_LIMIT=10
 
+# Safety auto-pause on owner message
+SAFETY_SWITCH=true
+
 # Custom AI personality
 SYSTEM_PROMPT=You are a helpful assistant...
 ```
@@ -121,6 +126,9 @@ The AI can include special tags in responses to trigger actions:
 - `[video_note:random]` - Send random video note
 - `[sticker:key]` - Send sticker by key from stickers.json
 - `[reaction:👍]` - React to the message with emoji
+- `[learn_topic:something]` - Learn a topic about the user
+- `[learn_pref:preference]` - Learn a user preference
+- `[learn_fact:fact]` - Learn a fact about the user
 
 Example AI response:
 ```
@@ -151,17 +159,17 @@ That's awesome! [reaction:🔥] Here's what I was talking about [photo:random]
 
 The bot includes 11 behavior functions for human-like interaction:
 
-1. `add_typos()` - Randomly introduce realistic typos
-2. `add_delays()` - Calculate typing delays
+1. `calculate_typing_delay()` - Calculate realistic typing delays based on text length
+2. `introduce_typo()` - Randomly introduce realistic typos
 3. `casualize_text()` - Convert formal to casual language
-4. `should_reply()` - Decide whether to respond
-5. `parse_tags()` - Extract media/reaction tags
-6. `select_random_file()` - Pick random media file
-7. `get_sticker_id()` - Retrieve sticker file_id
-8. `format_history_for_ai()` - Format chat history for API
-9. `is_dnd_active()` - Check Do Not Disturb status
-10. `sanitize_filename()` - Clean filenames for safety
-11. `validate_reaction_emoji()` - Verify emoji validity
+4. `is_circadian_sleep_time()` - Check if within DND hours
+5. `get_sleepy_response()` - Get a random sleepy/DND response
+6. `parse_media_tag()` - Extract media tags (photo, video_note, sticker)
+7. `parse_reaction_tag()` - Extract reaction emoji tags
+8. `extract_learning_data()` - Extract learning tags from responses
+9. `clean_response_text()` - Remove all tags from response text
+10. `format_message_for_history()` - Format user message for history
+11. `format_bot_message_for_history()` - Format bot response for history
 
 ## Database Schema
 
@@ -178,24 +186,44 @@ CREATE TABLE chat_history (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX idx_chat_timestamp ON chat_history(chat_id, timestamp DESC);
+CREATE TABLE user_profiles (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    first_name TEXT,
+    last_name TEXT,
+    preferences TEXT,
+    topics TEXT,
+    facts TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE blacklist (
+    user_id INTEGER PRIMARY KEY,
+    reason TEXT,
+    added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE whitelist (
+    user_id INTEGER PRIMARY KEY,
+    added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
 ```
 
 ## Logging
 
-Logs are written to:
-- `userbot.log` - File log with all events
+Logs are written using RotatingFileHandler:
+- `userbot.log` - File log with all events (max 5MB, 3 backups)
 - Console - Real-time output
 
-Log levels can be adjusted in `main.py`:
-```python
-logging.basicConfig(level=logging.INFO)  # Change to DEBUG for verbose logs
-```
+Log levels can be adjusted in `config.py`.
 
 ## Safety Features
 
-- **Manual Pause**: Use `.pause` to stop all responses
-- **DND Mode**: Automatic quiet hours
+- **Auto Pause**: Automatically pauses when owner sends a message (if SAFETY_SWITCH=true)
+- **Manual Pause**: Use `/pause` to stop all responses
+- **DND Mode**: Automatic quiet hours with sleepy responses
+- **Blacklist**: Block specific users from interacting
+- **Whitelist**: Allow only specific users to interact
 - **Owner-only Commands**: Control commands restricted to owner
 - **Validation**: Configuration validation on startup
 - **Error Handling**: Graceful handling of API errors and rate limits
@@ -204,14 +232,14 @@ logging.basicConfig(level=logging.INFO)  # Change to DEBUG for verbose logs
 ## Troubleshooting
 
 ### Bot not responding
-1. Check if paused: Send `.status` from your account
+1. Check if paused: Send `/status` from your account
 2. Verify DND hours in `.env`
 3. Check logs in `userbot.log`
 
 ### Authentication errors
 1. Verify API_ID and API_HASH are correct
 2. Delete `human_userbot.session` and restart
-3. Ensure phone number includes country code (+1234567890)
+3. Ensure you're using the correct account
 
 ### OpenAI errors
 1. Verify API key is valid and has credits
@@ -221,7 +249,7 @@ logging.basicConfig(level=logging.INFO)  # Change to DEBUG for verbose logs
 ### Media not sending
 1. Verify files exist in media/photos/ or media/video_notes/
 2. Check file permissions
-3. Ensure filenames are sanitized (no special characters)
+3. Ensure filenames don't contain special characters
 
 ## Development
 
@@ -249,10 +277,11 @@ python -c "from ai_handler import AIHandler; print('OK')"
 All dependencies are pinned to specific versions in `requirements.txt`:
 
 - `pyrogram==2.0.106` - Telegram MTProto API framework
+- `pyaes==1.6.1` - Pure Python AES implementation
 - `tgcrypto==1.2.5` - Cryptography for Pyrogram (performance)
-- `openai==1.12.0` - OpenAI API client
-- `python-dotenv==1.0.1` - Environment variable management
-- `aiosqlite==0.19.0` - Async SQLite operations
+- `openai==1.3.0` - OpenAI API client
+- `python-dotenv==1.0.0` - Environment variable management
+- `aiofiles==23.2.1` - Async file operations
 
 ## Security Notes
 
@@ -260,7 +289,7 @@ All dependencies are pinned to specific versions in `requirements.txt`:
 - Keep your session file (`human_userbot.session`) private
 - Rotate OpenAI API keys periodically
 - Review bot responses regularly to ensure appropriate behavior
-- Use `.pause` when not actively monitoring the bot
+- Use `/pause` when not actively monitoring the bot
 
 ## License
 
