@@ -2,17 +2,42 @@ import os
 import json
 import logging
 from pathlib import Path
+from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 
 load_dotenv()
 
-logger = logging.getLogger(__name__)
+
+def setup_logging():
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    file_handler = RotatingFileHandler(
+        'userbot.log',
+        maxBytes=5*1024*1024,
+        backupCount=3
+    )
+    file_handler.setFormatter(formatter)
+    
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+
+logger = setup_logging()
 
 
 class Config:
     API_ID = os.getenv("API_ID")
     API_HASH = os.getenv("API_HASH")
-    PHONE_NUMBER = os.getenv("PHONE_NUMBER")
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     OWNER_ID = os.getenv("OWNER_ID")
     
@@ -26,6 +51,7 @@ class Config:
     
     AI_TIMEOUT = int(os.getenv("AI_TIMEOUT", "30"))
     HISTORY_LIMIT = int(os.getenv("HISTORY_LIMIT", "10"))
+    SAFETY_SWITCH = os.getenv("SAFETY_SWITCH", "true").lower() == "true"
     
     DB_PATH = os.getenv("DB_PATH", "chat_history.db")
     STICKERS_FILE = os.getenv("STICKERS_FILE", "stickers.json")
@@ -47,9 +73,6 @@ class Config:
         
         if not cls.API_HASH:
             errors.append("API_HASH is required")
-        
-        if not cls.PHONE_NUMBER:
-            errors.append("PHONE_NUMBER is required")
         
         if not cls.OPENAI_API_KEY:
             errors.append("OPENAI_API_KEY is required")
