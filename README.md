@@ -1,362 +1,283 @@
-# Telegram Human Userbot
+# Human-like Telegram Userbot
 
-A production-ready Telegram userbot built with Pyrogram that simulates natural human behavior, including realistic typing delays, occasional typos, casual language, and AI-powered contextual responses.
+A sophisticated Telegram userbot powered by Pyrogram and OpenAI that mimics human conversation behavior with realistic typing patterns, typos, reactions, and media sending capabilities.
 
 ## Features
 
-### 🤖 Human-like Behavior
-- **Realistic typing delays** based on message length
-- **Occasional typos** to mimic human typing errors
-- **Casual suffixes** like "lol", "haha", emoji for natural conversation
-- **Variable response timing** with jitter and reading speed simulation
-- **Random response probability** to avoid responding to every message
+### Core Functionality
+- **AI-Powered Responses**: Uses OpenAI GPT for natural conversation
+- **Conversation History**: SQLite database with async operations
+- **Human-like Behavior**: Realistic typing delays, typos, casual language
+- **Smart Reply Logic**: Contextual decision-making for when to respond
+- **Do Not Disturb**: Configurable quiet hours
 
-### 🧠 AI-Powered Responses
-- **OpenAI GPT integration** for contextual, natural responses
-- **Conversation history tracking** for context-aware replies
-- **Personality customization** via system prompts
-- **Multiple response types**: text, photos, video notes, stickers, reactions
+### Advanced Features
+- **Owner Commands**: Pause/resume, status check, history clearing
+- **Media Support**: Send photos, video notes, and stickers
+- **Reaction Support**: React to messages with emojis
+- **Tag Parsing**: Extract media/reaction commands from AI responses
+- **Safety Pause**: Manual control to prevent unwanted responses
+- **Async Architecture**: Non-blocking operations with ThreadPoolExecutor
 
-### 🛡️ Safety & Rate Limiting
-- **Do Not Disturb (DND) mode** with configurable hours
-- **Rate limiting** per chat to prevent spam
-- **Minimum response interval** to avoid appearing too eager
-- **Flood protection** with automatic backoff
-- **Message length limits** to prevent token overflow
+## Installation
 
-### 📊 Data Management
-- **Async SQLite** database for message history
-- **ThreadPoolExecutor** for efficient I/O operations
-- **Message statistics** tracking per chat
-- **Automatic cleanup** of old messages
-- **Response logging** for interval tracking
+### Prerequisites
+- Python 3.8 or higher
+- Telegram account
+- OpenAI API key
+- Telegram API credentials (API_ID and API_HASH)
 
-### 🎯 Flexible Response Types
-- **Text responses** with AI generation
-- **Photo sharing** from local directory
-- **Video notes** for quick reactions
-- **Sticker/emoji reactions** for casual acknowledgment
-- **Smart media selection** based on context
+### Setup
+
+1. **Clone the repository**
+```bash
+git clone <repository-url>
+cd <repository-directory>
+```
+
+2. **Install dependencies**
+```bash
+pip install -r requirements.txt
+```
+
+3. **Configure environment variables**
+```bash
+cp .env.example .env
+# Edit .env with your credentials
+```
+
+4. **Get Telegram API credentials**
+   - Visit https://my.telegram.org
+   - Log in with your phone number
+   - Go to "API development tools"
+   - Create a new application
+   - Copy API_ID and API_HASH to .env
+
+5. **Get OpenAI API key**
+   - Visit https://platform.openai.com/api-keys
+   - Create a new API key
+   - Copy to OPENAI_API_KEY in .env
+
+6. **Get your Telegram User ID**
+   - Message @userinfobot on Telegram
+   - Copy your ID to OWNER_ID in .env
+
+7. **Add media files (optional)**
+```bash
+# Add photos to media/photos/
+# Add video notes to media/video_notes/
+```
+
+8. **Configure stickers (optional)**
+   - Send a sticker in Telegram
+   - Forward it to @JsonDumpBot
+   - Copy the file_id from the sticker object
+   - Add to stickers.json with a memorable key
+
+## Usage
+
+### Starting the Bot
+```bash
+python main.py
+```
+
+On first run, you'll be prompted to enter the verification code sent to your Telegram account.
+
+### Owner Commands
+
+All owner commands start with a dot (`.`) and only work for messages sent by you:
+
+- `.pause` - Pause bot responses
+- `.resume` - Resume bot responses
+- `.status` - Show bot status and statistics
+- `.clear` - Clear conversation history for current chat
+
+### Configuration
+
+Edit `.env` to customize behavior:
+
+```env
+# Do Not Disturb hours (24-hour format)
+DND_START=23:00
+DND_END=08:00
+
+# AI response timeout (seconds)
+AI_TIMEOUT=30
+
+# Number of messages to include in context
+HISTORY_LIMIT=10
+
+# Custom AI personality
+SYSTEM_PROMPT=You are a helpful assistant...
+```
+
+### AI Response Tags
+
+The AI can include special tags in responses to trigger actions:
+
+- `[photo:filename.jpg]` - Send specific photo from media/photos/
+- `[photo:random]` - Send random photo
+- `[video_note:filename.mp4]` - Send specific video note
+- `[video_note:random]` - Send random video note
+- `[sticker:key]` - Send sticker by key from stickers.json
+- `[reaction:👍]` - React to the message with emoji
+
+Example AI response:
+```
+That's awesome! [reaction:🔥] Here's what I was talking about [photo:random]
+```
 
 ## Project Structure
 
 ```
 .
-├── main.py              # Main bot implementation with HumanUserBot class
-├── config.py            # Configuration management and validation
-├── behavior.py          # Human behavior simulation (11 functions)
-├── history.py           # Async SQLite database manager
+├── main.py              # Main application and message handling
+├── config.py            # Configuration and validation
+├── behavior.py          # Human-like behavior functions (11 functions)
+├── history.py           # SQLite history manager with async wrapper
 ├── ai_handler.py        # OpenAI API integration
-├── requirements.txt     # Python dependencies
-├── .env.example         # Example environment configuration
-├── stickers.json        # Sticker/emoji database
+├── requirements.txt     # Python dependencies (pinned versions)
+├── .env.example         # Environment variables template
+├── stickers.json        # Sticker file_id mappings
 ├── README.md            # This file
 └── media/
-    ├── photos/          # Directory for photos to share
+    ├── photos/          # Photo files for sending
     │   └── .gitkeep
-    └── video_notes/     # Directory for video notes
+    └── video_notes/     # Video note files for sending
         └── .gitkeep
 ```
 
-## Installation
-
-### Prerequisites
-
-- Python 3.8 or higher
-- Telegram API credentials (API ID and API Hash)
-- OpenAI API key
-- Active Telegram account
-
-### Setup Steps
-
-1. **Clone the repository**
-   ```bash
-   git clone <repository-url>
-   cd telegram-userbot
-   ```
-
-2. **Create virtual environment**
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-
-3. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Get Telegram API credentials**
-   - Go to https://my.telegram.org
-   - Log in with your phone number
-   - Navigate to "API Development Tools"
-   - Create a new application to get `API_ID` and `API_HASH`
-
-5. **Get OpenAI API key**
-   - Go to https://platform.openai.com/api-keys
-   - Create a new API key
-
-6. **Configure environment**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your credentials
-   ```
-
-7. **Add media (optional)**
-   - Add photos to `media/photos/` (jpg, png, jpeg)
-   - Add video notes to `media/video_notes/` (mp4, mov)
-
-## Configuration
-
-Edit `.env` file with your settings:
-
-### Required Settings
-
-```env
-# Telegram credentials
-API_ID=12345678
-API_HASH=your_api_hash_here
-PHONE_NUMBER=+1234567890
-
-# OpenAI configuration
-OPENAI_API_KEY=sk-your-key-here
-OPENAI_MODEL=gpt-4o-mini
-```
-
-### Optional Settings
-
-```env
-# Behavior customization
-RESPONSE_CHANCE=0.15              # 15% chance to respond
-TYPING_MIN_DELAY=1.0              # Min typing delay in seconds
-TYPING_MAX_DELAY=3.0              # Max typing delay in seconds
-TYPO_CHANCE=0.10                  # 10% chance of typo
-CASUAL_SUFFIX_CHANCE=0.20         # 20% chance of casual suffix
-
-# Do Not Disturb
-DND_START=23:00                   # Start DND at 11 PM
-DND_END=08:00                     # End DND at 8 AM
-
-# Rate limiting
-MAX_MESSAGE_LENGTH=4096           # Max message length
-RATE_LIMIT_MESSAGES=5             # Max messages per window
-RATE_LIMIT_WINDOW=60              # Window in seconds
-MIN_RESPONSE_INTERVAL=30          # Min seconds between responses
-
-# Logging
-LOG_LEVEL=INFO                    # DEBUG, INFO, WARNING, ERROR, CRITICAL
-LOG_FILE=userbot.log              # Log file path
-```
-
-## Usage
-
-### Start the bot
-
-```bash
-python main.py
-```
-
-On first run, you'll need to:
-1. Enter the verification code sent to your Telegram account
-2. Enter 2FA password if enabled
-
-The bot will then run in the background, monitoring messages and responding based on configured behavior.
-
-### Stop the bot
-
-Press `Ctrl+C` or send `SIGTERM` signal. The bot will gracefully shut down, closing all connections and saving state.
-
 ## Behavior Functions
 
-The `behavior.py` module contains 11 functions for human-like behavior:
+The bot includes 11 behavior functions for human-like interaction:
 
-1. **`should_respond()`** - Random chance decision
-2. **`is_dnd_active()`** - Check Do Not Disturb status
-3. **`simulate_typing_delay()`** - Async typing delay
-4. **`add_typo()`** - Add realistic typos to text
-5. **`add_casual_suffix()`** - Add casual endings
-6. **`truncate_message()`** - Limit message length
-7. **`select_random_photo()`** - Pick random photo
-8. **`select_random_video_note()`** - Pick random video
-9. **`select_random_sticker()`** - Pick random sticker
-10. **`calculate_response_delay()`** - Calculate reading time
-11. **`should_send_media()`** - Decide response type
-
-## Safety Features
-
-### Rate Limiting
-- Prevents sending too many messages in a short time
-- Configurable per-chat limits
-- Automatic message counting and window management
-
-### DND Mode
-- Automatically skip responses during configured hours
-- Timezone-aware (uses system timezone)
-- Configurable start/end times
-
-### Flood Protection
-- Automatic handling of Telegram FloodWait errors
-- Exponential backoff on repeated errors
-- Graceful degradation under heavy load
-
-### Error Handling
-- Comprehensive try-catch blocks
-- Logging of all errors
-- Graceful fallbacks for failed operations
+1. `add_typos()` - Randomly introduce realistic typos
+2. `add_delays()` - Calculate typing delays
+3. `casualize_text()` - Convert formal to casual language
+4. `should_reply()` - Decide whether to respond
+5. `parse_tags()` - Extract media/reaction tags
+6. `select_random_file()` - Pick random media file
+7. `get_sticker_id()` - Retrieve sticker file_id
+8. `format_history_for_ai()` - Format chat history for API
+9. `is_dnd_active()` - Check Do Not Disturb status
+10. `sanitize_filename()` - Clean filenames for safety
+11. `validate_reaction_emoji()` - Verify emoji validity
 
 ## Database Schema
 
-### Messages Table
+SQLite database with async operations via ThreadPoolExecutor:
+
 ```sql
-CREATE TABLE messages (
+CREATE TABLE chat_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
-    user_id INTEGER,
-    username TEXT,
-    text TEXT,
-    timestamp DATETIME NOT NULL,
-    is_outgoing BOOLEAN NOT NULL DEFAULT 0,
-    UNIQUE(chat_id, message_id)
-)
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    timestamp REAL NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_chat_timestamp ON chat_history(chat_id, timestamp DESC);
 ```
 
-### Response Log Table
-```sql
-CREATE TABLE response_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id INTEGER NOT NULL,
-    response_timestamp DATETIME NOT NULL
-)
-```
+## Logging
 
-## Architecture
+Logs are written to:
+- `userbot.log` - File log with all events
+- Console - Real-time output
 
-### Main Components
-
-1. **HumanUserBot** - Main bot class orchestrating all functionality
-2. **HistoryManager** - Async database operations with connection pooling
-3. **AIHandler** - OpenAI API integration with error handling
-4. **RateLimiter** - Per-chat rate limiting with sliding window
-5. **Config** - Centralized configuration with validation
-
-### Message Flow
-
-```
-Incoming Message
-    ↓
-Store in Database
-    ↓
-Check Filters (outgoing, service, bot)
-    ↓
-Check DND Status
-    ↓
-Check Response Interval
-    ↓
-Check Rate Limit
-    ↓
-Random Response Decision
-    ↓
-Calculate Response Delay
-    ↓
-Select Media Type
-    ↓
-Generate AI Response (if text)
-    ↓
-Add Typos & Casual Elements
-    ↓
-Simulate Typing
-    ↓
-Send Response
-    ↓
-Log Response & Update Rate Limit
-```
-
-## Development
-
-### Running Tests
-
-```bash
-# Syntax check all Python files
-python -m py_compile main.py config.py behavior.py history.py ai_handler.py
-```
-
-### Adding Custom Behavior
-
-Edit `behavior.py` to customize:
-- Typo patterns
-- Casual suffixes
-- Response delays
-- Media selection logic
-
-### Customizing AI Personality
-
-Edit the system prompt in `ai_handler.py`:
+Log levels can be adjusted in `main.py`:
 ```python
-def _build_system_prompt(self, chat_title: Optional[str] = None) -> str:
-    prompt = """Your custom personality here..."""
-    return prompt
+logging.basicConfig(level=logging.INFO)  # Change to DEBUG for verbose logs
 ```
+
+## Safety Features
+
+- **Manual Pause**: Use `.pause` to stop all responses
+- **DND Mode**: Automatic quiet hours
+- **Owner-only Commands**: Control commands restricted to owner
+- **Validation**: Configuration validation on startup
+- **Error Handling**: Graceful handling of API errors and rate limits
+- **FloodWait**: Automatic handling of Telegram rate limits
 
 ## Troubleshooting
 
 ### Bot not responding
+1. Check if paused: Send `.status` from your account
+2. Verify DND hours in `.env`
+3. Check logs in `userbot.log`
 
-1. Check `LOG_LEVEL=DEBUG` in `.env`
-2. Review `userbot.log` for errors
-3. Verify `RESPONSE_CHANCE` is not too low
-4. Check DND is not active
-5. Verify rate limits not exceeded
+### Authentication errors
+1. Verify API_ID and API_HASH are correct
+2. Delete `human_userbot.session` and restart
+3. Ensure phone number includes country code (+1234567890)
 
-### API Errors
+### OpenAI errors
+1. Verify API key is valid and has credits
+2. Check AI_TIMEOUT setting (increase if slow)
+3. Monitor rate limits in logs
 
-**OpenAI Rate Limit**: Reduce `RESPONSE_CHANCE` or upgrade plan  
-**Telegram FloodWait**: Bot automatically handles this  
-**Invalid Credentials**: Verify API_ID, API_HASH, and PHONE_NUMBER
+### Media not sending
+1. Verify files exist in media/photos/ or media/video_notes/
+2. Check file permissions
+3. Ensure filenames are sanitized (no special characters)
 
-### Session Issues
+## Development
 
-Delete `*.session` files and restart to create new session:
+### Running syntax checks
 ```bash
-rm *.session
-python main.py
+python -m py_compile main.py
+python -m py_compile config.py
+python -m py_compile behavior.py
+python -m py_compile history.py
+python -m py_compile ai_handler.py
 ```
 
-## Best Practices
+### Testing database
+```bash
+python -c "from history import HistoryManager; h = HistoryManager('test.db'); print('OK')"
+```
 
-1. **Start with low RESPONSE_CHANCE** (0.10-0.15) to avoid spam
-2. **Enable DND during sleep hours** to maintain realism
-3. **Use appropriate LOG_LEVEL** (INFO for production, DEBUG for development)
-4. **Regular cleanup** of old messages to keep database small
-5. **Monitor rate limits** and adjust as needed
-6. **Keep media diverse** for more natural responses
-7. **Review logs regularly** for errors or unusual patterns
+### Testing AI handler
+```bash
+python -c "from ai_handler import AIHandler; print('OK')"
+```
 
-## Security Considerations
+## Dependencies
 
-- **Never commit `.env` file** - Contains sensitive credentials
-- **Protect session files** - Allow account access
-- **Use strong 2FA** on Telegram account
-- **Monitor API usage** - Prevent unexpected charges
-- **Review message logs** - Ensure appropriate responses
-- **Limit permissions** - Run with minimal required access
+All dependencies are pinned to specific versions in `requirements.txt`:
+
+- `pyrogram==2.0.106` - Telegram MTProto API framework
+- `tgcrypto==1.2.5` - Cryptography for Pyrogram (performance)
+- `openai==1.12.0` - OpenAI API client
+- `python-dotenv==1.0.1` - Environment variable management
+- `aiosqlite==0.19.0` - Async SQLite operations
+
+## Security Notes
+
+- Never commit `.env` file with real credentials
+- Keep your session file (`human_userbot.session`) private
+- Rotate OpenAI API keys periodically
+- Review bot responses regularly to ensure appropriate behavior
+- Use `.pause` when not actively monitoring the bot
 
 ## License
 
-[Specify your license here]
+This project is provided as-is for educational and personal use.
 
 ## Contributing
 
-Contributions are welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Commit changes with clear messages
-4. Submit a pull request
+Contributions are welcome! Please ensure:
+- Code follows existing style conventions
+- All functions include error handling
+- Logging is comprehensive
+- Configuration is validated
 
 ## Support
 
-For issues, questions, or feature requests, please open an issue on the repository.
-
-## Disclaimer
-
-This userbot is for educational purposes. Ensure compliance with Telegram's Terms of Service. The authors are not responsible for misuse or violations of platform policies. Use responsibly and ethically.
+For issues or questions:
+1. Check the logs in `userbot.log`
+2. Review the troubleshooting section
+3. Verify configuration in `.env`
+4. Test individual components (config, behavior, history, ai_handler)
