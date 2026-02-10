@@ -1,254 +1,343 @@
 import asyncio
 import logging
-import time
+import random
 from pathlib import Path
-from pyrogram import Client, filters
-from pyrogram.types import Message
-from pyrogram.errors import FloodWait, BadRequest
+from typing import Optional
 
-from config import Config
-from history import HistoryManager
+from pyrogram import Client, filters
+from pyrogram.errors import FloodWait, RPCError
+from pyrogram.types import Message
+
 from ai_handler import AIHandler
 from behavior import (
-    add_typos,
-    add_delays,
+    calculate_typing_delay,
     casualize_text,
-    should_reply,
-    parse_tags,
-    select_random_file,
-    get_sticker_id,
-    format_history_for_ai,
-    is_dnd_active,
-    sanitize_filename,
-    validate_reaction_emoji
+    clean_response_text,
+    extract_learning_data,
+    format_bot_message_for_history,
+    format_message_for_history,
+    get_sleepy_response,
+    introduce_typo,
+    is_circadian_sleep_time,
+    parse_media_tag,
+    parse_reaction_tag,
 )
+from config import Config
+from history import HistoryManager
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('userbot.log'),
-        logging.StreamHandler()
-    ]
-)
+Config.configure_logging()
 logger = logging.getLogger(__name__)
 
 
 class HumanUserBot:
-    def __init__(self):
+    def __init__(self) -> None:
         Config.validate()
-        
         self.app = Client(
             "human_userbot",
             api_id=int(Config.API_ID),
             api_hash=Config.API_HASH,
-            phone_number=Config.PHONE_NUMBER
         )
-        
         self.history = HistoryManager(Config.DB_PATH)
         self.ai = AIHandler(
             api_key=Config.OPENAI_API_KEY,
+            model=Config.OPENAI_MODEL,
             system_prompt=Config.SYSTEM_PROMPT,
-            timeout=Config.AI_TIMEOUT
+            timeout=Config.AI_TIMEOUT,
         )
-        
         self.stickers = Config.load_stickers()
         self.owner_id = int(Config.OWNER_ID)
         self.paused = False
-        
+        self.whitelist_only = False
         self.register_handlers()
         logger.info("HumanUserBot initialized")
-    
-    def register_handlers(self):
-        @self.app.on_message(filters.command("pause", prefixes=".") & filters.me)
-        async def pause_handler(client: Client, message: Message):
-            self.paused = True
-            await message.edit("🔇 Bot paused")
-            logger.info("Bot paused by owner")
-        
-        @self.app.on_message(filters.command("resume", prefixes=".") & filters.me)
-        async def resume_handler(client: Client, message: Message):
-            self.paused = False
-            await message.edit("🔊 Bot resumed")
-            logger.info("Bot resumed by owner")
-        
-        @self.app.on_message(filters.command("status", prefixes=".") & filters.me)
-        async def status_handler(client: Client, message: Message):
-            stats = await self.history.get_stats()
-            status_text = f"""
-📊 Bot Status
-State: {'Paused' if self.paused else 'Active'}
-DND: {Config.DND_START} - {Config.DND_END}
-Messages: {stats['total_messages']}
-Chats: {stats['total_chats']}
-            """.strip()
-            await message.edit(status_text)
-        
-        @self.app.on_message(filters.command("clear", prefixes=".") & filters.me)
-        async def clear_handler(client: Client, message: Message):
-            chat_id = message.chat.id
-            await self.history.clear_chat_history(chat_id)
-            await message.edit("🗑️ Chat history cleared")
-            logger.info(f"Cleared history for chat {chat_id}")
-        
-        @self.app.on_message(filters.incoming & ~filters.me & ~filters.bot)
-        async def message_handler(client: Client, message: Message):
+
+    def register_handlers(self) -> None:
+        command_filter = filters.command(
+            ["pause", "resume", "status", "history", "blacklist", "whitelist"],
+            prefixes="/",
+        )
+
+        @self.app.on_message(filters.user(self.owner_id) & command_filter)
+        async def owner_commands(_: Client, message: Message) -> None:
+            if not message.command:
+                return
+            command = message.command[0].lower()
+            if command == "pause":
+                self.paused = True
+                await message.reply_text("🔇 Bot paused.")
+                return
+            if command == "resume":
+                self.paused = False
+                await message.reply_text("🔊 Bot resumed.")
+                return
+            if command == "status":
+                await message.reply_text(self._build_status())
+                return
+            if command == "history":
+                await self._send_history(message)
+                return
+            if command == "blacklist":
+                await self._handle_blacklist(message)
+                return
+            if command == "whitelist":
+                await self._handle_whitelist(message)
+                return
+
+        @self.app.on_message(filters.outgoing & filters.user(self.owner_id) & ~command_filter)
+        async def owner_safety_handler(_: Client, message: Message) -> None:
+            if not Config.SAFETY_AUTO_PAUSE:
+                return
             if self.paused:
-                logger.debug("Bot is paused, ignoring message")
                 return
-            
-            if is_dnd_active(Config.DND_START, Config.DND_END):
-                logger.debug("DND active, ignoring message")
+            if message.chat and message.chat.is_self:
                 return
-            
+            self.paused = True
+            logger.warning("Safety auto-pause engaged by owner message")
+            await self._notify_admin("Safety auto-pause engaged after owner activity.")
+
+        @self.app.on_message(filters.incoming & ~filters.bot)
+        async def message_handler(client: Client, message: Message) -> None:
+            if self.paused:
+                return
+
+            if not message.from_user:
+                return
+
+            user_id = message.from_user.id
+            if await self.history.is_blacklisted(user_id):
+                return
+
+            if self.whitelist_only and not await self.history.is_whitelisted(user_id):
+                return
+
             chat_id = message.chat.id
             message_text = message.text or message.caption or ""
-            
             if not message_text:
-                logger.debug("No text content, skipping")
                 return
-            
+
             await self.history.add_message(
                 chat_id=chat_id,
                 message_id=message.id,
                 role="user",
-                content=message_text,
-                timestamp=time.time()
+                content=format_message_for_history(
+                    message_text,
+                    message.from_user.first_name or "User",
+                    user_id == self.owner_id,
+                ),
             )
-            
-            me = await client.get_me()
-            username = me.username if me else None
-            
-            if not should_reply(message_text, username):
-                logger.debug("Decided not to reply")
+
+            if is_circadian_sleep_time(Config.DND_START, Config.DND_END):
+                if Config.DND_MODE == "silent":
+                    return
+                await self._send_sleepy_reply(message, chat_id)
                 return
-            
+
             try:
-                await self.process_and_respond(client, message, chat_id)
-            except Exception as e:
-                logger.error(f"Error processing message: {e}")
-    
-    async def process_and_respond(self, client: Client, message: Message, chat_id: int):
-        history_entries = await self.history.get_recent_history(chat_id, Config.HISTORY_LIMIT)
-        formatted_history = format_history_for_ai(history_entries)
-        
-        ai_response = await self.ai.get_response_with_retry(formatted_history)
-        
+                await self._process_message(client, message, chat_id)
+            except Exception as exc:
+                logger.error("Failed to process message: %s", exc)
+                await self._notify_admin("⚠️ Failed to process a message. Check logs.")
+
+    async def _process_message(self, client: Client, message: Message, chat_id: int) -> None:
+        history_entries = await self.history.get_history(chat_id, Config.HISTORY_LIMIT)
+        ai_messages = [
+            {"role": entry["role"], "content": entry["content"]}
+            for entry in history_entries
+        ]
+
+        ai_response = await self.ai.get_response(ai_messages)
         if not ai_response:
-            logger.warning("No AI response received")
+            await self._notify_admin("⚠️ AI response empty. Pausing replies.")
             return
-        
-        clean_text, tags = parse_tags(ai_response)
-        
-        await asyncio.sleep(add_delays())
-        
-        if tags['reaction']:
-            await self.send_reaction(message, tags['reaction'])
-        
-        if clean_text:
-            clean_text = casualize_text(clean_text)
-            clean_text = add_typos(clean_text, probability=0.05)
-            
-            await client.send_chat_action(chat_id, "typing")
-            await asyncio.sleep(min(len(clean_text) / 20, 5))
-            
+
+        response_text, media_tags = parse_media_tag(ai_response)
+        response_text, reaction = parse_reaction_tag(response_text)
+        response_text, learning_items = extract_learning_data(response_text)
+        response_text = clean_response_text(response_text)
+        response_text = casualize_text(response_text)
+
+        if learning_items:
+            await self._update_learning(chat_id, learning_items)
+
+        if reaction:
+            await self._send_reaction(message, reaction)
+
+        if response_text:
+            await self._send_text_reply(message, chat_id, response_text)
+
+        await self._send_media(message, media_tags)
+
+    async def _send_text_reply(self, message: Message, chat_id: int, response_text: str) -> None:
+        delay = calculate_typing_delay(
+            response_text,
+            Config.TYPING_MIN_DELAY,
+            Config.TYPING_MAX_DELAY,
+        )
+        await self.app.send_chat_action(chat_id, "typing")
+        await asyncio.sleep(delay)
+
+        typo_text, corrected_text = introduce_typo(response_text, Config.TYPO_PROBABILITY)
+        try:
+            sent = await message.reply_text(typo_text)
+        except FloodWait as exc:
+            await asyncio.sleep(exc.value)
+            sent = await message.reply_text(typo_text)
+        except RPCError as exc:
+            logger.error("Failed to send message: %s", exc)
+            return
+
+        if typo_text != corrected_text:
+            await asyncio.sleep(min(1.4, delay))
             try:
-                sent_message = await message.reply_text(clean_text)
-                
-                await self.history.add_message(
-                    chat_id=chat_id,
-                    message_id=sent_message.id,
-                    role="assistant",
-                    content=clean_text,
-                    timestamp=time.time()
-                )
-                
-                logger.info(f"Sent reply to chat {chat_id}")
-            except FloodWait as e:
-                logger.warning(f"FloodWait: sleeping for {e.value}s")
-                await asyncio.sleep(e.value)
-            except BadRequest as e:
-                logger.error(f"BadRequest: {e}")
-        
-        if tags['photo']:
-            await self.send_photo(client, message, tags['photo'])
-        
-        if tags['video_note']:
-            await self.send_video_note(client, message, tags['video_note'])
-        
-        if tags['sticker']:
-            await self.send_sticker(client, message, tags['sticker'])
-    
-    async def send_reaction(self, message: Message, emoji: str):
+                await sent.edit_text(corrected_text)
+            except RPCError as exc:
+                logger.warning("Failed to edit typo: %s", exc)
+
+        await self.history.add_message(
+            chat_id=chat_id,
+            message_id=sent.id,
+            role="assistant",
+            content=format_bot_message_for_history(corrected_text),
+        )
+
+    async def _send_sleepy_reply(self, message: Message, chat_id: int) -> None:
+        sleepy_text = get_sleepy_response()
+        await self.app.send_chat_action(chat_id, "typing")
+        await asyncio.sleep(calculate_typing_delay(sleepy_text, 0.4, 2.2))
+        sent = await message.reply_text(sleepy_text)
+        await self.history.add_message(
+            chat_id=chat_id,
+            message_id=sent.id,
+            role="assistant",
+            content=format_bot_message_for_history(sleepy_text),
+        )
+
+    async def _send_reaction(self, message: Message, reaction: str) -> None:
         try:
-            if validate_reaction_emoji(emoji):
-                await message.react(emoji)
-                logger.info(f"Sent reaction: {emoji}")
-            else:
-                logger.warning(f"Invalid reaction emoji: {emoji}")
-        except Exception as e:
-            logger.error(f"Error sending reaction: {e}")
-    
-    async def send_photo(self, client: Client, message: Message, photo_identifier: str):
+            await message.react(reaction)
+        except RPCError as exc:
+            logger.warning("Failed to send reaction: %s", exc)
+
+    async def _send_media(self, message: Message, media_tags: dict) -> None:
+        if media_tags.get("photo"):
+            await self._send_photo(message, media_tags["photo"])
+        if media_tags.get("video_note"):
+            await self._send_video_note(message, media_tags["video_note"])
+        if media_tags.get("sticker"):
+            await self._send_sticker(message, media_tags["sticker"])
+
+    async def _send_photo(self, message: Message, identifier: str) -> None:
+        path = self._resolve_media_path(Config.PHOTOS_DIR, identifier)
+        if not path:
+            return
+        await message.reply_photo(str(path))
+
+    async def _send_video_note(self, message: Message, identifier: str) -> None:
+        path = self._resolve_media_path(Config.VIDEO_NOTES_DIR, identifier)
+        if not path:
+            return
+        await message.reply_video_note(str(path))
+
+    async def _send_sticker(self, message: Message, key: str) -> None:
+        sticker_id = self.stickers.get(key)
+        if not sticker_id:
+            await self._notify_admin(f"⚠️ Unknown sticker key: {key}")
+            return
+        await message.reply_sticker(sticker_id)
+
+    def _resolve_media_path(self, directory: Path, identifier: str) -> Optional[Path]:
+        if identifier == "random":
+            files = [item for item in directory.iterdir() if item.is_file()]
+            if not files:
+                return None
+            return random.choice(files)
+        candidate = directory / identifier
+        return candidate if candidate.exists() else None
+
+    async def _update_learning(self, chat_id: int, items: list) -> None:
+        profile = await self.history.get_profile(chat_id)
+        notes = profile.get("notes", [])
+        notes.extend(items)
+        profile["notes"] = notes[-50:]
+        await self.history.save_profile(chat_id, profile)
+
+    async def _notify_admin(self, text: str) -> None:
         try:
-            if photo_identifier == "random":
-                photo_path = select_random_file(Config.PHOTOS_DIR)
-            else:
-                photo_path = Config.PHOTOS_DIR / sanitize_filename(photo_identifier)
-                if not photo_path.exists():
-                    logger.warning(f"Photo not found: {photo_path}")
-                    return
-                photo_path = str(photo_path)
-            
-            if photo_path:
-                await message.reply_photo(photo_path)
-                logger.info(f"Sent photo: {photo_path}")
-        except Exception as e:
-            logger.error(f"Error sending photo: {e}")
-    
-    async def send_video_note(self, client: Client, message: Message, video_identifier: str):
-        try:
-            if video_identifier == "random":
-                video_path = select_random_file(Config.VIDEO_NOTES_DIR)
-            else:
-                video_path = Config.VIDEO_NOTES_DIR / sanitize_filename(video_identifier)
-                if not video_path.exists():
-                    logger.warning(f"Video note not found: {video_path}")
-                    return
-                video_path = str(video_path)
-            
-            if video_path:
-                await message.reply_video_note(video_path)
-                logger.info(f"Sent video note: {video_path}")
-        except Exception as e:
-            logger.error(f"Error sending video note: {e}")
-    
-    async def send_sticker(self, client: Client, message: Message, sticker_key: str):
-        try:
-            sticker_id = get_sticker_id(self.stickers, sticker_key)
-            if sticker_id:
-                await message.reply_sticker(sticker_id)
-                logger.info(f"Sent sticker: {sticker_key}")
-        except Exception as e:
-            logger.error(f"Error sending sticker: {e}")
-    
-    def run(self):
-        logger.info("Starting HumanUserBot...")
+            await self.app.send_message("me", text)
+        except RPCError as exc:
+            logger.error("Failed to notify admin: %s", exc)
+
+    async def _send_history(self, message: Message) -> None:
+        chat_id = message.chat.id
+        history_entries = await self.history.get_history(chat_id, 10)
+        if not history_entries:
+            await message.reply_text("No history yet.")
+            return
+        lines = [f"{entry['role']}: {entry['content']}" for entry in history_entries]
+        await message.reply_text("\n".join(lines))
+
+    async def _handle_blacklist(self, message: Message) -> None:
+        target_id = self._extract_target_user(message)
+        if target_id is None:
+            await message.reply_text("Provide a user ID or reply to a user to blacklist.")
+            return
+        if len(message.command) > 1 and message.command[1].lower() == "remove":
+            await self.history.remove_blacklist(target_id)
+            await message.reply_text(f"Removed {target_id} from blacklist.")
+            return
+        await self.history.add_blacklist(target_id)
+        await message.reply_text(f"Blacklisted {target_id}.")
+
+    async def _handle_whitelist(self, message: Message) -> None:
+        target_id = self._extract_target_user(message)
+        if target_id is None:
+            await message.reply_text("Provide a user ID or reply to a user to whitelist.")
+            return
+        await self.history.add_whitelist(target_id)
+        self.whitelist_only = True
+        await message.reply_text(f"Whitelisted {target_id}.")
+
+    def _extract_target_user(self, message: Message) -> Optional[int]:
+        if message.reply_to_message and message.reply_to_message.from_user:
+            return message.reply_to_message.from_user.id
+        if len(message.command) > 1:
+            if message.command[1].lower() == "remove" and len(message.command) > 2:
+                try:
+                    return int(message.command[2])
+                except ValueError:
+                    return None
+            try:
+                return int(message.command[1])
+            except ValueError:
+                return None
+        return None
+
+    def _build_status(self) -> str:
+        return (
+            "🤖 Bot Status\n"
+            f"Paused: {self.paused}\n"
+            f"DND: {Config.DND_START}-{Config.DND_END} ({Config.DND_MODE})\n"
+            f"Safety Auto-Pause: {Config.SAFETY_AUTO_PAUSE}\n"
+            f"History Limit: {Config.HISTORY_LIMIT}"
+        )
+
+    def run(self) -> None:
+        logger.info("Starting HumanUserBot")
         self.app.run()
-    
-    def __del__(self):
-        if hasattr(self, 'history'):
+
+    def __del__(self) -> None:
+        if hasattr(self, "history"):
             self.history.close()
 
 
-def main():
+def main() -> None:
     try:
         bot = HumanUserBot()
         bot.run()
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}", exc_info=True)
+    except Exception as exc:
+        logger.error("Fatal error: %s", exc)
 
 
 if __name__ == "__main__":
